@@ -41,19 +41,38 @@ class Calibration(object):
         TODO(rqi): do matrix multiplication only once for each projection.
     '''
 
-    def __init__(self, calib_filepath):
+    def __init__(self, calib_dir):
 
-        calibs = self.read_calib_file(calib_filepath)
+        calibs = self.read_calib_file(calib_dir)
+
+        ### depth calib format ###
         # Projection matrix from rect camera coord to image2 coord
-        self.P = calibs['P2']
+        self.P = calibs['P_rect_02']
         self.P = np.reshape(self.P, [3, 4])
         # Rigid transform from Velodyne coord to reference camera coord
-        self.V2C = calibs['Tr_velo_to_cam']
-        self.V2C = np.reshape(self.V2C, [3, 4])
+        self.R=calibs['R']
+        self.R=np.reshape(self.R,[3,3])
+        self.t=calibs['T']
+        self.t=np.reshape(self.t,[3,1])
+
+        self.V2C = np.concatenate((self.R,self.t),axis=1)
         self.C2V = inverse_rigid_trans(self.V2C)
+
         # Rotation from reference camera coord to rect camera coord
-        self.R0 = calibs['R0_rect']
+        self.R0 = calibs['R_rect_02']
         self.R0 = np.reshape(self.R0, [3, 3])
+
+        # ### object calib format ###
+        # # Projection matrix from rect camera coord to image2 coord
+        # self.P = calibs['P2']
+        # self.P = np.reshape(self.P, [3, 4])
+        # # Rigid transform from Velodyne coord to reference camera coord
+        # self.V2C = calibs['Tr_velo_to_cam']
+        # self.V2C = np.reshape(self.V2C, [3, 4])
+        # self.C2V = inverse_rigid_trans(self.V2C)
+        # # Rotation from reference camera coord to rect camera coord
+        # self.R0 = calibs['R0_rect']
+        # self.R0 = np.reshape(self.R0, [3, 3])
 
         # Camera intrinsics and extrinsics
         self.c_u = self.P[0, 2]
@@ -63,13 +82,32 @@ class Calibration(object):
         self.b_x = self.P[0, 3] / (-self.f_u)  # relative
         self.b_y = self.P[1, 3] / (-self.f_v)
 
-    def read_calib_file(self, filepath):
+        # 由于网络输入（输出）的image经过裁剪，(u0,v0)需要做相应的调整
+        self.c_u = self.c_u-(1226-1216)/2
+        self.c_v = self.c_v-(370-352)/2
+
+### depth calib read ###
+     def read_calib_file(self, calib_dir):
         ''' Read in a calibration file and parse into a dictionary.
         Ref: https://github.com/utiasSTARS/pykitti/blob/master/pykitti/utils.py
         '''
-        data = {}
-        with open(filepath, 'r') as f:
-            for line in f.readlines():
+
+        data={}
+
+        with open(calib_dir+'/calib_cam_to_cam.txt', 'r') as f_c2c:
+            for line in f_c2c.readlines():
+                line = line.rstrip()
+                if len(line) == 0: continue
+                key, value = line.split(':', 1)
+                # The only non-float values in these files are dates, which
+                # we don't care about anyway
+                try:
+                    data[key] = np.array([float(x) for x in value.split()])
+                except ValueError:
+                    pass
+
+        with open(calib_dir+'/calib_velo_to_cam.txt', 'r') as f_v2c:
+            for line in f_v2c.readlines():
                 line = line.rstrip()
                 if len(line) == 0: continue
                 key, value = line.split(':', 1)
@@ -82,6 +120,27 @@ class Calibration(object):
 
         return data
 
+# ### object calib read ###
+#     def read_calib_file(self, filepath):
+#             ''' Read in a calibration file and parse into a dictionary.
+#             Ref: https://github.com/utiasSTARS/pykitti/blob/master/pykitti/utils.py
+#             '''
+#             data = {}
+#             with open(filepath, 'r') as f:
+#                 for line in f.readlines():
+#                     line = line.rstrip()
+#                     if len(line) == 0: continue
+#                     key, value = line.split(':', 1)
+#                     # The only non-float values in these files are dates, which
+#                     # we don't care about anyway
+#                     try:
+#                         data[key] = np.array([float(x) for x in value.split()])
+#                     except ValueError:
+#                         pass
+#
+#             return data
+
+
     def cart2hom(self, pts_3d):
         ''' Input: nx3 points in Cartesian
             Oupput: nx4 points in Homogeneous by pending 1
@@ -90,9 +149,9 @@ class Calibration(object):
         pts_3d_hom = np.hstack((pts_3d, np.ones((n, 1))))
         return pts_3d_hom
 
-    # =========================== 
-    # ------- 3d to 3d ---------- 
-    # =========================== 
+    # ===========================
+    # ------- 3d to 3d ----------
+    # ===========================
     def project_velo_to_ref(self, pts_3d_velo):
         pts_3d_velo = self.cart2hom(pts_3d_velo)  # nx4
         return np.dot(pts_3d_velo, np.transpose(self.V2C))
@@ -120,9 +179,9 @@ class Calibration(object):
         pts_3d_ref = self.project_velo_to_ref(pts_3d_velo)
         return self.project_ref_to_rect(pts_3d_ref)
 
-    # =========================== 
-    # ------- 3d to 2d ---------- 
-    # =========================== 
+    # ===========================
+    # ------- 3d to 2d ----------
+    # ===========================
     def project_rect_to_image(self, pts_3d_rect):
         ''' Input: nx3 points in rect camera coord.
             Output: nx2 points in image2 coord.
@@ -140,17 +199,19 @@ class Calibration(object):
         pts_3d_rect = self.project_velo_to_rect(pts_3d_velo)
         return self.project_rect_to_image(pts_3d_rect)
 
-    # =========================== 
-    # ------- 2d to 3d ---------- 
-    # =========================== 
+    # ===========================
+    # ------- 2d to 3d ----------
+    # ===========================
     def project_image_to_rect(self, uv_depth):
         ''' Input: nx3 first two channels are uv, 3rd channel
                    is depth in rect camera coord.
             Output: nx3 points in rect camera coord.
         '''
+        # depth need to be deregularized
         n = uv_depth.shape[0]
-        x = ((uv_depth[:, 0] - self.c_u) * uv_depth[:, 2]) / self.f_u + self.b_x
-        y = ((uv_depth[:, 1] - self.c_v) * uv_depth[:, 2]) / self.f_v + self.b_y
+        depth=uv_depth[:, 2]
+        x = ((uv_depth[:, 0] - self.c_u) * depth) / self.f_u + self.b_x
+        y = ((uv_depth[:, 1] - self.c_v) * depth) / self.f_v + self.b_y
         pts_3d_rect = np.zeros((n, 3))
         pts_3d_rect[:, 0] = x
         pts_3d_rect[:, 1] = y
